@@ -352,6 +352,226 @@ async def reset_index():
     ingestion_status["last_result"] = None
     return {"message": "Index réinitialisé"}
 
+"""
+=============================================================
+AJOUT À api.py — Endpoint d'analyse de CV
+=============================================================
+
+1. Ajoute ces imports en haut de api.py (après les imports existants) :
+   from src.cv_analyzer import analyze_cv_with_rag
+
+2. Colle ce bloc d'endpoints AVANT la ligne `if __name__ == "__main__":`
+=============================================================
+"""
+
+# ─── CV Analyzer ────────────────────────────────────────────────────────────
+
+import PyPDF2
+import io
+from pydantic import BaseModel as _BaseModel
+
+
+class CVAnalysisResponse(_BaseModel):
+    cv_name: str
+    detected_profile: str
+    detected_skills: list
+    post_exists_in_sonatrach: bool
+    confidence: str            # "haute" | "moyenne" | "faible"
+    matching_department: str
+    matching_post: str
+    recommendation: str        # "Recommandé" | "À étudier" | "Non recommandé"
+    justification: str
+    rag_sources: list
+    elapsed_seconds: float
+
+
+def _extract_text_from_pdf(file_bytes: bytes) -> str:
+    """Extrait le texte brut d'un PDF uploadé."""
+    reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+    text = ""
+    for page in reader.pages:
+        text += page.extract_text() or ""
+    return text.strip()
+
+
+@app.post("/cv/analyze", response_model=CVAnalysisResponse)
+async def analyze_cv(file: UploadFile = File(...)):
+    """
+    Analyse un CV (PDF ou texte) et détermine :
+    - Le profil détecté
+    - Si le poste correspondant existe chez Sonatrach
+    - Le département concerné
+    - Une recommandation GTP (Gestion des Talents et du Personnel)
+    """
+    import time as _time
+
+    if not pipeline:
+        raise HTTPException(503, "Pipeline non initialisé")
+    if pipeline.vector_store.count() == 0:
+        raise HTTPException(400, "Aucun document indexé. Appelez POST /ingest d'abord.")
+
+    # ── 1. Lecture du fichier ──────────────────────────────────────────────
+    content = await file.read()
+    filename = file.filename or "cv_inconnu"
+
+    if filename.lower().endswith(".pdf"):
+        try:
+            cv_text = _extract_text_from_pdf(content)
+        except Exception as e:
+            raise HTTPException(400, f"Impossible de lire le PDF : {e}")
+    else:
+        try:
+            cv_text = content.decode("utf-8", errors="ignore")
+        except Exception:
+            raise HTTPException(400, "Format non supporté. Envoyez un PDF ou un fichier texte.")
+
+    if len(cv_text) < 50:
+        raise HTTPException(400, "CV trop court ou illisible. Vérifiez le fichier.")
+
+    cv_text_truncated = cv_text[:3000]  # Limite pour le prompt
+
+    # ── 2. Première requête RAG : extraction du profil ────────────────────
+    t0 = _time.time()
+
+    extraction_q = f"""
+Voici le contenu d'un CV :
+---
+{cv_text_truncated}
+---
+Identifie et liste :
+1. Le titre du poste ou la spécialité principale de ce candidat
+2. Les compétences techniques clés (max 8)
+3. Le niveau d'expérience (junior <3ans / confirmé 3-7ans / senior >7ans)
+Réponds en JSON strict avec les clés : titre_poste, competences, niveau_experience.
+"""
+
+    try:
+        extraction_result = pipeline.query(
+            question=extraction_q,
+            use_query_transform=False,
+            stream=False,
+        )
+        profile_answer = extraction_result.get("answer", "")
+        rag_sources = extraction_result.get("sources", [])
+    except Exception as e:
+        raise HTTPException(500, f"Erreur analyse profil : {e}")
+
+    # Parse JSON souple
+    import json, re
+    detected_profile = "Profil non déterminé"
+    detected_skills = []
+    try:
+        json_match = re.search(r'\{.*\}', profile_answer, re.DOTALL)
+        if json_match:
+            parsed = json.loads(json_match.group())
+            detected_profile = parsed.get("titre_poste", detected_profile)
+            detected_skills = parsed.get("competences", [])
+            if isinstance(detected_skills, str):
+                detected_skills = [s.strip() for s in detected_skills.split(",")]
+    except Exception:
+        # Fallback : extraire le profil depuis le texte libre
+        lines = profile_answer.split("\n")
+        if lines:
+            detected_profile = lines[0][:100]
+
+    # ── 3. Deuxième requête RAG : vérification poste Sonatrach ────────────
+    verification_q = f"""
+Est-ce que le poste ou la spécialité "{detected_profile}" existe dans les offres d'emploi ou l'organigramme de Sonatrach ?
+Si oui, précise :
+- Le département ou la direction concernée (ex: Direction Exploration, DRH, Direction Informatique...)
+- L'intitulé exact du poste chez Sonatrach
+- Si ce profil correspond aux besoins actuels
+Sois précis et base-toi uniquement sur les documents indexés.
+"""
+
+    try:
+        verification_result = pipeline.query(
+            question=verification_q,
+            use_query_transform=False,
+            stream=False,
+        )
+        verification_answer = verification_result.get("answer", "")
+        rag_sources += [s for s in verification_result.get("sources", []) if s not in rag_sources]
+    except Exception as e:
+        raise HTTPException(500, f"Erreur vérification poste : {e}")
+
+    elapsed = round(_time.time() - t0, 2)
+
+    # ── 4. Analyse sémantique de la réponse ──────────────────────────────
+    answer_lower = verification_answer.lower()
+
+    # Détection existence du poste
+    negative_keywords = ["n'existe pas", "pas de poste", "aucun poste", "introuvable",
+                         "ne figure pas", "non trouvé", "pas trouvé", "pas mentionné"]
+    positive_keywords = ["existe", "correspond", "disponible", "recrute", "recherche",
+                         "département", "direction", "poste de", "offre"]
+
+    neg_score = sum(1 for kw in negative_keywords if kw in answer_lower)
+    pos_score = sum(1 for kw in positive_keywords if kw in answer_lower)
+
+    post_exists = pos_score > neg_score
+
+    # Confiance
+    if abs(pos_score - neg_score) >= 3:
+        confidence = "haute"
+    elif abs(pos_score - neg_score) >= 1:
+        confidence = "moyenne"
+    else:
+        confidence = "faible"
+
+    # Extraction département
+    dept_patterns = [
+        r"direction\s+[\w\s\-]+",
+        r"département\s+[\w\s\-]+",
+        r"division\s+[\w\s\-]+",
+        r"DRH|DSI|DEX|DG|DP\b",
+    ]
+    matching_department = "Non déterminé"
+    for pattern in dept_patterns:
+        match = re.search(pattern, verification_answer, re.IGNORECASE)
+        if match:
+            matching_department = match.group().strip()[:80]
+            break
+
+    # Extraction poste Sonatrach
+    post_patterns = [
+        r"poste de\s+[\w\s\-]+",
+        r"intitulé[:\s]+[\w\s\-]+",
+        r"en tant que\s+[\w\s\-]+",
+    ]
+    matching_post = detected_profile
+    for pattern in post_patterns:
+        match = re.search(pattern, verification_answer, re.IGNORECASE)
+        if match:
+            matching_post = match.group().strip()[:80]
+            break
+
+    # Recommandation GTP
+    if post_exists and confidence == "haute":
+        recommendation = "Recommandé"
+    elif post_exists and confidence == "moyenne":
+        recommendation = "À étudier"
+    else:
+        recommendation = "Non recommandé"
+
+    # Justification courte
+    justification_lines = [l.strip() for l in verification_answer.split("\n") if len(l.strip()) > 30]
+    justification = " ".join(justification_lines[:2])[:300] if justification_lines else verification_answer[:300]
+
+    return CVAnalysisResponse(
+        cv_name=filename,
+        detected_profile=detected_profile,
+        detected_skills=detected_skills[:8],
+        post_exists_in_sonatrach=post_exists,
+        confidence=confidence,
+        matching_department=matching_department,
+        matching_post=matching_post,
+        recommendation=recommendation,
+        justification=justification,
+        rag_sources=list(set(rag_sources))[:5],
+        elapsed_seconds=elapsed,
+    )
+
 if __name__ == "__main__":
     import uvicorn
     # Pour un tunnel ngrok, utiliser: python run_tunnel.py
