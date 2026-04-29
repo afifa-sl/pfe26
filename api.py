@@ -119,6 +119,35 @@ async def startup():
     pipeline = RAGPipeline(config)
 
 
+# ─── Helper CV : query sans extraction directe ────────────────────────────────
+
+def _query_for_cv(question: str, history=None) -> dict:
+    """
+    Appelle pipeline.query() en désactivant temporairement le mode
+    extraction directe (bypass LLM). Utilisé uniquement pour l'analyse CV
+    afin d'éviter que les mots-clés du CV (département, service, formation…)
+    ne déclenchent le mode liste exhaustif.
+    """
+    # Sauvegarde de la méthode originale
+    original_is_list = RAGPipeline._is_list_question
+
+    # Override : retourne toujours False → jamais de bypass LLM
+    RAGPipeline._is_list_question = staticmethod(lambda q: False)
+
+    try:
+        result = pipeline.query(
+            question=question,
+            use_query_transform=False,
+            stream=False,
+            history=history,
+        )
+    finally:
+        # Restauration garantie même en cas d'exception
+        RAGPipeline._is_list_question = original_is_list
+
+    return result
+
+
 # ─── Schemas ───────────────────────────────────────────────────────────────────
 
 class LienRequest(BaseModel):
@@ -395,7 +424,8 @@ async def analyze_cv(file: UploadFile = File(...)):
     cv_text_truncated = cv_text[:3000]
     t0 = time.time()
 
-    # ── 2. RAG #1 : extraction du profil (format structuré, plus fiable que JSON) ──
+    # ── 2. RAG #1 : extraction du profil ──────────────────────────────────────
+    # _query_for_cv() désactive le mode liste exhaustif pour éviter le bypass LLM
     extraction_q = f"""Lis attentivement ce CV et réponds en français dans ce format exact :
 
 TITRE: [titre du poste ou spécialité principale du candidat]
@@ -410,11 +440,7 @@ CV à analyser :
 Réponds uniquement avec les 3 lignes TITRE / COMPETENCES / NIVEAU, rien d'autre."""
 
     try:
-        extraction_result = pipeline.query(
-            question=extraction_q,
-            use_query_transform=False,
-            stream=False,
-        )
+        extraction_result = _query_for_cv(extraction_q)
         profile_answer = extraction_result.get("answer", "")
         rag_sources = extraction_result.get("sources", [])
     except Exception as e:
@@ -430,7 +456,6 @@ Réponds uniquement avec les 3 lignes TITRE / COMPETENCES / NIVEAU, rien d'autre
     if titre_match:
         detected_profile = titre_match.group(1).strip()[:120]
     else:
-        # Fallback : première ligne non vide de la réponse
         for line in profile_answer.split("\n"):
             line = line.strip()
             if len(line) > 5 and not line.startswith("-"):
@@ -444,6 +469,7 @@ Réponds uniquement avec les 3 lignes TITRE / COMPETENCES / NIVEAU, rien d'autre
     logger.info(f"Profil détecté : {detected_profile} | Compétences : {detected_skills}")
 
     # ── 3. RAG #2 : vérification poste Sonatrach ──────────────────────────────
+    # _query_for_cv() désactive le mode liste exhaustif ici aussi
     verification_q = f"""Dans les documents Sonatrach indexés (postes, départements, organigramme, offres d'emploi) :
 Est-ce qu'un poste correspondant à "{detected_profile}" existe ?
 
@@ -453,11 +479,7 @@ Si NON : dis clairement que ce poste n'existe pas dans les documents indexés.
 Sois précis et base-toi uniquement sur les documents disponibles."""
 
     try:
-        verification_result = pipeline.query(
-            question=verification_q,
-            use_query_transform=False,
-            stream=False,
-        )
+        verification_result = _query_for_cv(verification_q)
         verification_answer = verification_result.get("answer", "")
         rag_sources += [s for s in verification_result.get("sources", []) if s not in rag_sources]
     except Exception as e:
