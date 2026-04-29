@@ -56,8 +56,7 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# ─── CORS ────────────────────────────────────────────────────────────────────
-# ✅ localhost:5173 (Vite dev) + localhost:8001 inclus par défaut
+# ─── CORS ─────────────────────────────────────────────────────────────────────
 _default_origins = "http://localhost:5173,http://localhost:5174,http://localhost:8001"
 ALLOWED_ORIGINS = os.environ.get("CORS_ORIGINS", _default_origins).split(",")
 
@@ -69,7 +68,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─── Rate Limiter ─────────────────────────────────────────────────────────────
+# ─── Rate Limiter ──────────────────────────────────────────────────────────────
 _rate_limit_store: dict = defaultdict(list)
 RATE_LIMIT_MAX_REQUESTS = int(os.environ.get("RATE_LIMIT_MAX", "30"))
 RATE_LIMIT_WINDOW = 60
@@ -91,7 +90,7 @@ async def rate_limit_middleware(request: Request, call_next):
     return await call_next(request)
 
 
-# ─── État global ──────────────────────────────────────────────────────────────
+# ─── État global ───────────────────────────────────────────────────────────────
 pipeline: Optional[RAGPipeline] = None
 ingestion_status: dict = {"running": False, "last_result": None, "error": None}
 lien_status: dict = {"running": False, "last_result": None, "error": None}
@@ -120,7 +119,7 @@ async def startup():
     pipeline = RAGPipeline(config)
 
 
-# ─── Schemas ──────────────────────────────────────────────────────────────────
+# ─── Schemas ───────────────────────────────────────────────────────────────────
 
 class LienRequest(BaseModel):
     urls: List[HttpUrl]
@@ -169,7 +168,7 @@ class CVAnalysisResponse(BaseModel):
     elapsed_seconds: float
 
 
-# ─── Endpoints généraux ───────────────────────────────────────────────────────
+# ─── Endpoints généraux ────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
@@ -276,10 +275,8 @@ async def add_liens(request: LienRequest, background_tasks: BackgroundTasks):
     def run_scrape():
         lien_status["running"] = True
         lien_status["error"] = None
-        links = _load_links()
-        docs = []
-        errors = []
-        for url in links:
+        docs, errors = [], []
+        for url in _load_links():
             try:
                 doc = scrape_url(url)
                 docs.append(doc)
@@ -322,8 +319,7 @@ async def scrape_liens(background_tasks: BackgroundTasks):
     def run_scrape():
         lien_status["running"] = True
         lien_status["error"] = None
-        docs = []
-        errors = []
+        docs, errors = [], []
         for url in links:
             try:
                 doc = scrape_url(url)
@@ -352,21 +348,18 @@ async def reset_index():
     if not pipeline:
         raise HTTPException(503, "Pipeline non initialisé")
     pipeline.vector_store.reset()
-    bm25_path = config.bm25_index_path
-    if os.path.exists(bm25_path):
-        os.remove(bm25_path)
+    if os.path.exists(config.bm25_index_path):
+        os.remove(config.bm25_index_path)
     ingestion_status["last_result"] = None
     return {"message": "Index réinitialisé"}
 
 
-# ─── CV Analyzer ──────────────────────────────────────────────────────────────
+# ─── CV Analyzer ───────────────────────────────────────────────────────────────
 
 def _extract_text_from_pdf(file_bytes: bytes) -> str:
+    """Extrait le texte brut d'un PDF uploadé."""
     reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
-    text = ""
-    for page in reader.pages:
-        text += page.extract_text() or ""
-    return text.strip()
+    return "".join(page.extract_text() or "" for page in reader.pages).strip()
 
 
 @app.post("/cv/analyze", response_model=CVAnalysisResponse)
@@ -380,11 +373,10 @@ async def analyze_cv(file: UploadFile = File(...)):
     if pipeline.vector_store.count() == 0:
         raise HTTPException(400, "Aucun document indexé. Appelez POST /ingest d'abord.")
 
-    # ── 1. Lecture du fichier ─────────────────────────────────────────────────
+    # ── 1. Lecture du fichier ──────────────────────────────────────────────────
     content = await file.read()
     filename = file.filename or "cv_inconnu"
 
-    # ✅ Validation extension côté backend
     ext = os.path.splitext(filename)[1].lower()
     if ext not in {".pdf", ".txt"}:
         raise HTTPException(400, "Format non supporté. Envoyez un PDF ou un fichier TXT.")
@@ -401,21 +393,21 @@ async def analyze_cv(file: UploadFile = File(...)):
         raise HTTPException(400, "CV trop court ou illisible. Vérifiez le fichier.")
 
     cv_text_truncated = cv_text[:3000]
-
-    # ── 2. RAG #1 : extraction du profil ─────────────────────────────────────
     t0 = time.time()
 
-    extraction_q = f"""
-Voici le contenu d'un CV :
+    # ── 2. RAG #1 : extraction du profil (format structuré, plus fiable que JSON) ──
+    extraction_q = f"""Lis attentivement ce CV et réponds en français dans ce format exact :
+
+TITRE: [titre du poste ou spécialité principale du candidat]
+COMPETENCES: [compétence1, compétence2, compétence3, ...]
+NIVEAU: [junior / confirmé / senior]
+
+CV à analyser :
 ---
 {cv_text_truncated}
 ---
-Identifie et liste :
-1. Le titre du poste ou la spécialité principale de ce candidat
-2. Les compétences techniques clés (max 8)
-3. Le niveau d'expérience (junior <3ans / confirmé 3-7ans / senior >7ans)
-Réponds en JSON strict avec les clés : titre_poste, competences, niveau_experience.
-"""
+
+Réponds uniquement avec les 3 lignes TITRE / COMPETENCES / NIVEAU, rien d'autre."""
 
     try:
         extraction_result = pipeline.query(
@@ -428,32 +420,37 @@ Réponds en JSON strict avec les clés : titre_poste, competences, niveau_experi
     except Exception as e:
         raise HTTPException(500, f"Erreur analyse profil : {e}")
 
-    # Parse JSON souple
+    # Parse robuste : TITRE: / COMPETENCES: / NIVEAU:
     detected_profile = "Profil non déterminé"
     detected_skills = []
-    try:
-        json_match = re.search(r'\{.*\}', profile_answer, re.DOTALL)
-        if json_match:
-            parsed = json.loads(json_match.group())
-            detected_profile = parsed.get("titre_poste", detected_profile)
-            detected_skills = parsed.get("competences", [])
-            if isinstance(detected_skills, str):
-                detected_skills = [s.strip() for s in detected_skills.split(",")]
-    except Exception:
-        lines = profile_answer.split("\n")
-        if lines:
-            detected_profile = lines[0][:100]
 
-    # ── 3. RAG #2 : vérification poste Sonatrach ─────────────────────────────
-    verification_q = f"""
-Est-ce que le poste ou la spécialité "{detected_profile}" existe dans les offres d'emploi
-ou l'organigramme de Sonatrach ?
-Si oui, précise :
-- Le département ou la direction concernée (ex: Direction Exploration, DRH, DSI...)
-- L'intitulé exact du poste chez Sonatrach
-- Si ce profil correspond aux besoins actuels
-Sois précis et base-toi uniquement sur les documents indexés.
-"""
+    titre_match = re.search(r"TITRE\s*:\s*(.+)", profile_answer, re.IGNORECASE)
+    comp_match  = re.search(r"COMPETENCES\s*:\s*(.+)", profile_answer, re.IGNORECASE)
+
+    if titre_match:
+        detected_profile = titre_match.group(1).strip()[:120]
+    else:
+        # Fallback : première ligne non vide de la réponse
+        for line in profile_answer.split("\n"):
+            line = line.strip()
+            if len(line) > 5 and not line.startswith("-"):
+                detected_profile = line[:120]
+                break
+
+    if comp_match:
+        raw = comp_match.group(1).strip()
+        detected_skills = [s.strip() for s in raw.split(",") if s.strip()]
+
+    logger.info(f"Profil détecté : {detected_profile} | Compétences : {detected_skills}")
+
+    # ── 3. RAG #2 : vérification poste Sonatrach ──────────────────────────────
+    verification_q = f"""Dans les documents Sonatrach indexés (postes, départements, organigramme, offres d'emploi) :
+Est-ce qu'un poste correspondant à "{detected_profile}" existe ?
+
+Si OUI : indique le département exact, l'intitulé du poste chez Sonatrach, et si ce profil est actuellement recherché.
+Si NON : dis clairement que ce poste n'existe pas dans les documents indexés.
+
+Sois précis et base-toi uniquement sur les documents disponibles."""
 
     try:
         verification_result = pipeline.query(
@@ -468,13 +465,19 @@ Sois précis et base-toi uniquement sur les documents indexés.
 
     elapsed = round(time.time() - t0, 2)
 
-    # ── 4. Analyse sémantique ─────────────────────────────────────────────────
+    # ── 4. Analyse sémantique de la réponse ───────────────────────────────────
     answer_lower = verification_answer.lower()
 
-    negative_keywords = ["n'existe pas", "pas de poste", "aucun poste", "introuvable",
-                         "ne figure pas", "non trouvé", "pas trouvé", "pas mentionné"]
-    positive_keywords = ["existe", "correspond", "disponible", "recrute", "recherche",
-                         "département", "direction", "poste de", "offre"]
+    negative_keywords = [
+        "n'existe pas", "pas de poste", "aucun poste", "introuvable",
+        "ne figure pas", "non trouvé", "pas trouvé", "pas mentionné",
+        "je ne trouve pas", "aucune information", "pas dans les documents",
+    ]
+    positive_keywords = [
+        "existe", "correspond", "disponible", "recrute", "recherche",
+        "département", "direction", "poste de", "offre", "prévu", "requis",
+        "figure", "mentionné", "référencé",
+    ]
 
     neg_score = sum(1 for kw in negative_keywords if kw in answer_lower)
     pos_score = sum(1 for kw in positive_keywords if kw in answer_lower)
@@ -487,40 +490,48 @@ Sois précis et base-toi uniquement sur les documents indexés.
     else:
         confidence = "faible"
 
-    dept_patterns = [
-        r"direction\s+[\w\s\-]+",
-        r"département\s+[\w\s\-]+",
-        r"division\s+[\w\s\-]+",
-        r"DRH|DSI|DEX|DG|DP\b",
-    ]
+    # Extraction département
     matching_department = "Non déterminé"
-    for pattern in dept_patterns:
+    for pattern in [
+        r"direction\s+[\w\s\-]{3,40}",
+        r"département\s+[\w\s\-]{3,40}",
+        r"division\s+[\w\s\-]{3,40}",
+        r"\b(DRH|DSI|DEX|DG|DP)\b",
+    ]:
         match = re.search(pattern, verification_answer, re.IGNORECASE)
         if match:
             matching_department = match.group().strip()[:80]
             break
 
-    post_patterns = [
-        r"poste de\s+[\w\s\-]+",
-        r"intitulé[:\s]+[\w\s\-]+",
-        r"en tant que\s+[\w\s\-]+",
-    ]
+    # Extraction intitulé poste Sonatrach
     matching_post = detected_profile
-    for pattern in post_patterns:
+    for pattern in [
+        r"poste de\s+[\w\s\-]{3,40}",
+        r"intitulé[:\s]+[\w\s\-]{3,40}",
+        r"en tant que\s+[\w\s\-]{3,40}",
+    ]:
         match = re.search(pattern, verification_answer, re.IGNORECASE)
         if match:
             matching_post = match.group().strip()[:80]
             break
 
+    # Recommandation GTP
     if post_exists and confidence == "haute":
         recommendation = "Recommandé"
-    elif post_exists and confidence == "moyenne":
+    elif post_exists and confidence in ("moyenne", "faible"):
         recommendation = "À étudier"
     else:
         recommendation = "Non recommandé"
 
-    justification_lines = [l.strip() for l in verification_answer.split("\n") if len(l.strip()) > 30]
-    justification = " ".join(justification_lines[:2])[:300] if justification_lines else verification_answer[:300]
+    # Justification : 3 premières phrases significatives
+    justification_lines = [
+        l.strip() for l in verification_answer.split("\n") if len(l.strip()) > 30
+    ]
+    justification = (
+        " ".join(justification_lines[:3])[:400]
+        if justification_lines
+        else verification_answer[:400]
+    )
 
     return CVAnalysisResponse(
         cv_name=filename,
