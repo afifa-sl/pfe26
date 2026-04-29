@@ -5,7 +5,7 @@ API REST FastAPI pour le RAG local.
 Démarrage:
     python api.py
     # ou
-    uvicorn api:app --host 0.0.0.0 --port 8000
+    uvicorn api:app --host 0.0.0.0 --port 8001
 
 Endpoints:
     GET  /health          → Statut du système
@@ -17,15 +17,19 @@ Endpoints:
     POST /lien            → Ajouter des URLs et scraper tous les liens
     GET  /lien            → Lister les liens enregistrés
     POST /lien/scrape     → Scraper tous les liens sans en ajouter
+    POST /cv/analyze      → Analyser un CV (PDF ou TXT)
 """
 import logging
 import sys
 import os
 import shutil
 import json
+import re
+import io
 import time
 from collections import defaultdict
-from src.cv_analyzer import analyze_cv_with_rag
+
+import PyPDF2
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -48,47 +52,46 @@ from src.ingestion.loader import scrape_url
 
 app = FastAPI(
     title="RAG Local API",
-    description="Retrieval-Augmented Generation 100% local (HuggingFace + ChromaDB + sentence-transformers)",
+    description="Retrieval-Augmented Generation 100% local",
     version="1.0.0",
 )
 
-# CORS — restreint aux origines connues (ajouter les domaines autorisés)
-ALLOWED_ORIGINS = os.environ.get("CORS_ORIGINS", "http://localhost:5173,http://localhost:8001").split(",")
+# ─── CORS ────────────────────────────────────────────────────────────────────
+# ✅ localhost:5173 (Vite dev) + localhost:8001 inclus par défaut
+_default_origins = "http://localhost:5173,http://localhost:5174,http://localhost:8001"
+ALLOWED_ORIGINS = os.environ.get("CORS_ORIGINS", _default_origins).split(",")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-# ─── Rate Limiter simple en mémoire ───────────────────────────────────────
-
+# ─── Rate Limiter ─────────────────────────────────────────────────────────────
 _rate_limit_store: dict = defaultdict(list)
-RATE_LIMIT_MAX_REQUESTS = int(os.environ.get("RATE_LIMIT_MAX", "30"))  # par minute
-RATE_LIMIT_WINDOW = 60  # secondes
+RATE_LIMIT_MAX_REQUESTS = int(os.environ.get("RATE_LIMIT_MAX", "30"))
+RATE_LIMIT_WINDOW = 60
 
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
-    """Rate limiter par IP — bloque au-delà de RATE_LIMIT_MAX requêtes/minute."""
     client_ip = request.client.host if request.client else "unknown"
     now = time.time()
-
-    # Nettoie les entrées expirées
     _rate_limit_store[client_ip] = [
         t for t in _rate_limit_store[client_ip] if now - t < RATE_LIMIT_WINDOW
     ]
-
     if len(_rate_limit_store[client_ip]) >= RATE_LIMIT_MAX_REQUESTS:
         return JSONResponse(
             status_code=429,
             content={"detail": "Trop de requêtes. Réessayez dans une minute."},
         )
-
     _rate_limit_store[client_ip].append(now)
     return await call_next(request)
 
+
+# ─── État global ──────────────────────────────────────────────────────────────
 pipeline: Optional[RAGPipeline] = None
 ingestion_status: dict = {"running": False, "last_result": None, "error": None}
 lien_status: dict = {"running": False, "last_result": None, "error": None}
@@ -117,7 +120,7 @@ async def startup():
     pipeline = RAGPipeline(config)
 
 
-# ─── Schemas ────────────────────────────────────────────────────────────────
+# ─── Schemas ──────────────────────────────────────────────────────────────────
 
 class LienRequest(BaseModel):
     urls: List[HttpUrl]
@@ -152,7 +155,21 @@ class QueryResponse(BaseModel):
     elapsed_seconds: float
 
 
-# ─── Endpoints ──────────────────────────────────────────────────────────────
+class CVAnalysisResponse(BaseModel):
+    cv_name: str
+    detected_profile: str
+    detected_skills: list
+    post_exists_in_sonatrach: bool
+    confidence: str
+    matching_department: str
+    matching_post: str
+    recommendation: str
+    justification: str
+    rag_sources: list
+    elapsed_seconds: float
+
+
+# ─── Endpoints généraux ───────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
@@ -205,7 +222,6 @@ async def query(request: QueryRequest):
 
 @app.post("/ingest")
 async def ingest(background_tasks: BackgroundTasks, reset: bool = False):
-    """Déclenche l'ingestion en arrière-plan."""
     if not pipeline:
         raise HTTPException(503, "Pipeline non initialisé")
     if ingestion_status["running"]:
@@ -231,7 +247,6 @@ async def ingest(background_tasks: BackgroundTasks, reset: bool = False):
 
 @app.post("/upload")
 async def upload(file: UploadFile = File(...)):
-    """Upload un fichier dans le dossier documents."""
     os.makedirs(config.docs_dir, exist_ok=True)
     dest = os.path.join(config.docs_dir, file.filename)
     with open(dest, "wb") as f:
@@ -247,13 +262,11 @@ async def upload(file: UploadFile = File(...)):
 
 @app.post("/lien")
 async def add_liens(request: LienRequest, background_tasks: BackgroundTasks):
-    """Ajoute des URLs au store et scrape tous les liens enregistrés."""
     if not pipeline:
         raise HTTPException(503, "Pipeline non initialisé")
     if lien_status["running"]:
         raise HTTPException(409, "Scraping de liens déjà en cours")
 
-    # Ajout des nouvelles URLs au store persistant
     existing = _load_links()
     new_urls = [str(u) for u in request.urls]
     added = [u for u in new_urls if u not in existing]
@@ -270,10 +283,8 @@ async def add_liens(request: LienRequest, background_tasks: BackgroundTasks):
             try:
                 doc = scrape_url(url)
                 docs.append(doc)
-                print(f"  Scrappé: {url} ({len(doc.content):,} chars)")
             except Exception as e:
                 errors.append({"url": url, "error": str(e)})
-                print(f"  Erreur scraping {url}: {e}")
         try:
             result = pipeline.ingest_documents(docs)
             result["errors"] = errors
@@ -294,14 +305,12 @@ async def add_liens(request: LienRequest, background_tasks: BackgroundTasks):
 
 @app.get("/lien")
 async def list_liens():
-    """Liste tous les liens enregistrés."""
     links = _load_links()
     return {"links": links, "total": len(links), "status": lien_status}
 
 
 @app.post("/lien/scrape")
 async def scrape_liens(background_tasks: BackgroundTasks):
-    """Scrape et indexe tous les liens déjà enregistrés."""
     if not pipeline:
         raise HTTPException(503, "Pipeline non initialisé")
     if lien_status["running"]:
@@ -319,10 +328,8 @@ async def scrape_liens(background_tasks: BackgroundTasks):
             try:
                 doc = scrape_url(url)
                 docs.append(doc)
-                print(f"  Scrappé: {url} ({len(doc.content):,} chars)")
             except Exception as e:
                 errors.append({"url": url, "error": str(e)})
-                print(f"  Erreur scraping {url}: {e}")
         try:
             result = pipeline.ingest_documents(docs)
             result["errors"] = errors
@@ -342,7 +349,6 @@ async def scrape_liens(background_tasks: BackgroundTasks):
 
 @app.post("/reset")
 async def reset_index():
-    """Supprime et réinitialise l'index complet."""
     if not pipeline:
         raise HTTPException(503, "Pipeline non initialisé")
     pipeline.vector_store.reset()
@@ -352,41 +358,10 @@ async def reset_index():
     ingestion_status["last_result"] = None
     return {"message": "Index réinitialisé"}
 
-"""
-=============================================================
-AJOUT À api.py — Endpoint d'analyse de CV
-=============================================================
 
-1. Ajoute ces imports en haut de api.py (après les imports existants) :
-   from src.cv_analyzer import analyze_cv_with_rag
-
-2. Colle ce bloc d'endpoints AVANT la ligne `if __name__ == "__main__":`
-=============================================================
-"""
-
-# ─── CV Analyzer ────────────────────────────────────────────────────────────
-
-import PyPDF2
-import io
-from pydantic import BaseModel as _BaseModel
-
-
-class CVAnalysisResponse(_BaseModel):
-    cv_name: str
-    detected_profile: str
-    detected_skills: list
-    post_exists_in_sonatrach: bool
-    confidence: str            # "haute" | "moyenne" | "faible"
-    matching_department: str
-    matching_post: str
-    recommendation: str        # "Recommandé" | "À étudier" | "Non recommandé"
-    justification: str
-    rag_sources: list
-    elapsed_seconds: float
-
+# ─── CV Analyzer ──────────────────────────────────────────────────────────────
 
 def _extract_text_from_pdf(file_bytes: bytes) -> str:
-    """Extrait le texte brut d'un PDF uploadé."""
     reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
     text = ""
     for page in reader.pages:
@@ -397,41 +372,38 @@ def _extract_text_from_pdf(file_bytes: bytes) -> str:
 @app.post("/cv/analyze", response_model=CVAnalysisResponse)
 async def analyze_cv(file: UploadFile = File(...)):
     """
-    Analyse un CV (PDF ou texte) et détermine :
-    - Le profil détecté
-    - Si le poste correspondant existe chez Sonatrach
-    - Le département concerné
-    - Une recommandation GTP (Gestion des Talents et du Personnel)
+    Analyse un CV (PDF ou TXT) et détermine si un poste correspondant
+    existe chez Sonatrach, avec recommandation GTP.
     """
-    import time as _time
-
     if not pipeline:
         raise HTTPException(503, "Pipeline non initialisé")
     if pipeline.vector_store.count() == 0:
         raise HTTPException(400, "Aucun document indexé. Appelez POST /ingest d'abord.")
 
-    # ── 1. Lecture du fichier ──────────────────────────────────────────────
+    # ── 1. Lecture du fichier ─────────────────────────────────────────────────
     content = await file.read()
     filename = file.filename or "cv_inconnu"
 
-    if filename.lower().endswith(".pdf"):
+    # ✅ Validation extension côté backend
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in {".pdf", ".txt"}:
+        raise HTTPException(400, "Format non supporté. Envoyez un PDF ou un fichier TXT.")
+
+    if ext == ".pdf":
         try:
             cv_text = _extract_text_from_pdf(content)
         except Exception as e:
             raise HTTPException(400, f"Impossible de lire le PDF : {e}")
     else:
-        try:
-            cv_text = content.decode("utf-8", errors="ignore")
-        except Exception:
-            raise HTTPException(400, "Format non supporté. Envoyez un PDF ou un fichier texte.")
+        cv_text = content.decode("utf-8", errors="ignore")
 
     if len(cv_text) < 50:
         raise HTTPException(400, "CV trop court ou illisible. Vérifiez le fichier.")
 
-    cv_text_truncated = cv_text[:3000]  # Limite pour le prompt
+    cv_text_truncated = cv_text[:3000]
 
-    # ── 2. Première requête RAG : extraction du profil ────────────────────
-    t0 = _time.time()
+    # ── 2. RAG #1 : extraction du profil ─────────────────────────────────────
+    t0 = time.time()
 
     extraction_q = f"""
 Voici le contenu d'un CV :
@@ -457,7 +429,6 @@ Réponds en JSON strict avec les clés : titre_poste, competences, niveau_experi
         raise HTTPException(500, f"Erreur analyse profil : {e}")
 
     # Parse JSON souple
-    import json, re
     detected_profile = "Profil non déterminé"
     detected_skills = []
     try:
@@ -469,16 +440,16 @@ Réponds en JSON strict avec les clés : titre_poste, competences, niveau_experi
             if isinstance(detected_skills, str):
                 detected_skills = [s.strip() for s in detected_skills.split(",")]
     except Exception:
-        # Fallback : extraire le profil depuis le texte libre
         lines = profile_answer.split("\n")
         if lines:
             detected_profile = lines[0][:100]
 
-    # ── 3. Deuxième requête RAG : vérification poste Sonatrach ────────────
+    # ── 3. RAG #2 : vérification poste Sonatrach ─────────────────────────────
     verification_q = f"""
-Est-ce que le poste ou la spécialité "{detected_profile}" existe dans les offres d'emploi ou l'organigramme de Sonatrach ?
+Est-ce que le poste ou la spécialité "{detected_profile}" existe dans les offres d'emploi
+ou l'organigramme de Sonatrach ?
 Si oui, précise :
-- Le département ou la direction concernée (ex: Direction Exploration, DRH, Direction Informatique...)
+- Le département ou la direction concernée (ex: Direction Exploration, DRH, DSI...)
 - L'intitulé exact du poste chez Sonatrach
 - Si ce profil correspond aux besoins actuels
 Sois précis et base-toi uniquement sur les documents indexés.
@@ -495,12 +466,11 @@ Sois précis et base-toi uniquement sur les documents indexés.
     except Exception as e:
         raise HTTPException(500, f"Erreur vérification poste : {e}")
 
-    elapsed = round(_time.time() - t0, 2)
+    elapsed = round(time.time() - t0, 2)
 
-    # ── 4. Analyse sémantique de la réponse ──────────────────────────────
+    # ── 4. Analyse sémantique ─────────────────────────────────────────────────
     answer_lower = verification_answer.lower()
 
-    # Détection existence du poste
     negative_keywords = ["n'existe pas", "pas de poste", "aucun poste", "introuvable",
                          "ne figure pas", "non trouvé", "pas trouvé", "pas mentionné"]
     positive_keywords = ["existe", "correspond", "disponible", "recrute", "recherche",
@@ -508,10 +478,8 @@ Sois précis et base-toi uniquement sur les documents indexés.
 
     neg_score = sum(1 for kw in negative_keywords if kw in answer_lower)
     pos_score = sum(1 for kw in positive_keywords if kw in answer_lower)
-
     post_exists = pos_score > neg_score
 
-    # Confiance
     if abs(pos_score - neg_score) >= 3:
         confidence = "haute"
     elif abs(pos_score - neg_score) >= 1:
@@ -519,7 +487,6 @@ Sois précis et base-toi uniquement sur les documents indexés.
     else:
         confidence = "faible"
 
-    # Extraction département
     dept_patterns = [
         r"direction\s+[\w\s\-]+",
         r"département\s+[\w\s\-]+",
@@ -533,7 +500,6 @@ Sois précis et base-toi uniquement sur les documents indexés.
             matching_department = match.group().strip()[:80]
             break
 
-    # Extraction poste Sonatrach
     post_patterns = [
         r"poste de\s+[\w\s\-]+",
         r"intitulé[:\s]+[\w\s\-]+",
@@ -546,7 +512,6 @@ Sois précis et base-toi uniquement sur les documents indexés.
             matching_post = match.group().strip()[:80]
             break
 
-    # Recommandation GTP
     if post_exists and confidence == "haute":
         recommendation = "Recommandé"
     elif post_exists and confidence == "moyenne":
@@ -554,7 +519,6 @@ Sois précis et base-toi uniquement sur les documents indexés.
     else:
         recommendation = "Non recommandé"
 
-    # Justification courte
     justification_lines = [l.strip() for l in verification_answer.split("\n") if len(l.strip()) > 30]
     justification = " ".join(justification_lines[:2])[:300] if justification_lines else verification_answer[:300]
 
@@ -572,7 +536,7 @@ Sois précis et base-toi uniquement sur les documents indexés.
         elapsed_seconds=elapsed,
     )
 
+
 if __name__ == "__main__":
     import uvicorn
-    # Pour un tunnel ngrok, utiliser: python run_tunnel.py
     uvicorn.run(app, host="0.0.0.0", port=8001)
