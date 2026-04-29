@@ -1,0 +1,11 @@
+pandas
+openpyxl
+fastapi
+uvicorn
+chromadb
+sentence-transformers
+rank-bm25
+pypdf
+python-docx
+beautifulsoup4
+pyngrok
