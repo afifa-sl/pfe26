@@ -25,6 +25,7 @@ import shutil
 import json
 import time
 from collections import defaultdict
+from src.cv_analyzer import analyze_cv_with_rag
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
