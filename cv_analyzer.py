@@ -119,11 +119,8 @@ Recommandé / À étudier / Non recommandé avec justification.
 Observations supplémentaires.
 
 **POSTE RECOMMANDÉ**
-En te basant UNIQUEMENT sur la formation, les diplômes et l'expérience réelle du candidat 
-(ignore complètement le poste "{poste}" demandé), quel est le poste Sonatrach 
-le plus adapté à ce profil parmi ceux disponibles dans les exigences ci-dessus ?
-Si le candidat correspond bien au poste demandé, tu peux le confirmer.
-Réponds par un seul intitulé de poste.
+Nom du poste Sonatrach le plus adapté à ce candidat.
+Répondre par un seul intitulé.
 """
 
 
