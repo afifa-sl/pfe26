@@ -227,10 +227,7 @@ def analyze_cv_with_pipeline(pipeline, cv_text: str, poste: str) -> dict:
     score = _extract_score(answer)
     recommended_poste = _extract_recommended_poste(answer)
 
-    logger.info("=== DEBUG POSTE ===")
-logger.info("recommended_poste extrait : %r", recommended_poste)
-logger.info("Fin LLM answer : %r", answer[-400:])
-
+    
     elapsed = round(time.time() - t0, 2)
 
     return {
