@@ -185,6 +185,7 @@ def _extract_score(text: str) -> Optional[int]:
     patterns = [
         r"SCORE[^:]*:\s*(\d{1,2})/10",
         r"(\d{1,2})\s*/\s*10",
+        r"SCORE[^:]*:\s*\[?(\d{1,2})\]?",
     ]
     for pat in patterns:
         m = re.search(pat, text, re.IGNORECASE)
