@@ -227,13 +227,13 @@ def analyze_cv_with_pipeline(pipeline, cv_text: str, poste: str) -> dict:
     elapsed = round(time.time() - t0, 2)
 
     return {
-        "answer": answer,
-        "score": score,
-        "poste": search_poste or recommended_poste or "Non précisé",
-        "sources": sources,
-        "elapsed_seconds": elapsed,
-    }
-
+    "answer": answer,
+    "score": score,
+    "poste": search_poste or recommended_poste or "Non précisé",
+    "recommended_poste": recommended_poste or "Non précisé",  # ← ajouter
+    "sources": sources,
+    "elapsed_seconds": elapsed,
+}
 
 # ─────────────────────────────────────────────────────────────
 # Parsers
@@ -263,13 +263,17 @@ def _extract_recommended_poste(text: str) -> Optional[str]:
     import re
 
     patterns = [
-        r"POSTE RECOMMANDÉ\s*:?\s*(.+)",
-        r"\*\*POSTE RECOMMANDÉ\*\*\s*\n(.+)",
+        r"\*\*POSTE RECOMMANDÉ\*\*\s*[:\n]+\s*(.+)",
+        r"POSTE RECOMMANDÉ\s*[:\n]+\s*(.+)",
+        r"POSTE RECOMMANDÉ\s*:\s*(.+)",
     ]
 
     for pat in patterns:
-        m = re.search(pat, text, re.IGNORECASE)
+        m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
         if m:
-            return m.group(1).strip().split("\n")[0]
+            value = m.group(1).strip().split("\n")[0].strip("*• \t")
+            if value:
+                return value
 
+    return None
     return None
