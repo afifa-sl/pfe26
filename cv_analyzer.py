@@ -77,6 +77,8 @@ ANALYSIS_PROMPT = """Tu es un expert RH chez Sonatrach. Analyse le CV ci-dessous
 === INSTRUCTIONS ===
 Réponds UNIQUEMENT en français, de façon structurée, avec les sections suivantes :
 
+=== FORMAT OBLIGATOIRE (ne pas utiliser #, ##, ###) ===
+
 **SCORE DE CORRESPONDANCE** : [OBLIGATOIRE: un chiffre entier entre 0 et 10, exemple: 7]/10
 
 **POINTS FORTS**
