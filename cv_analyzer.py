@@ -106,7 +106,7 @@ Observations supplémentaires."""
 
 def build_analysis_prompt(cv_text: str, poste: str, job_context: str) -> str:
     return ANALYSIS_PROMPT.format(
-poste=poste or "poste généraliste Sonatrach (ingénierie, technique ou administratif)",
+        poste=poste or "poste généraliste Sonatrach (ingénierie, technique ou administratif)",
         job_context=job_context or "Aucun document spécifique au poste n'a été trouvé. Basez-vous sur les bonnes pratiques générales.",
         cv_text=cv_text[:4000],  # limite pour ne pas dépasser le contexte LLM
     )
