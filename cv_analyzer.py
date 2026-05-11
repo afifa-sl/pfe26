@@ -261,19 +261,18 @@ def _extract_score(text: str) -> Optional[int]:
 
 def _extract_recommended_poste(text: str) -> Optional[str]:
     import re
-
     patterns = [
         r"\*\*POSTE RECOMMANDÉ\*\*\s*[:\n]+\s*(.+)",
         r"POSTE RECOMMANDÉ\s*[:\n]+\s*(.+)",
         r"POSTE RECOMMANDÉ\s*:\s*(.+)",
+        r"\*\*POSTE RECOMMAND[EÉ]\*\*\s*[:\n]+\s*(.+)",  # ← accent optionnel
+        r"POSTE RECOMMAND[EÉ]\s*[:\n]+\s*(.+)",
     ]
-
     for pat in patterns:
         m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
         if m:
             value = m.group(1).strip().split("\n")[0].strip("*• \t")
             if value:
                 return value
-
-    return None
+   
     return None
