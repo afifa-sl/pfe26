@@ -134,7 +134,7 @@ def analyze_cv_with_pipeline(pipeline, cv_text: str, poste: str) -> dict:
         top_chunks = fused[:pipeline.config.top_k_after_rerank]
         if pipeline.reranker and top_chunks:
             pairs = [(search_query, c["content"]) for c in top_chunks]
-            scores = pipeline.reranker.predict(pairs)
+            scores = pipeline.reranker.model.predict(pairs)
             for c, s in zip(top_chunks, scores):
                 c["rerank_score"] = float(s)
             top_chunks = sorted(top_chunks, key=lambda x: x.get("rerank_score", 0), reverse=True)
