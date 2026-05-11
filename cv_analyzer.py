@@ -179,10 +179,7 @@ def analyze_cv_with_pipeline(pipeline, cv_text: str, poste: str) -> dict:
 
     # 4. Extraction du score (robuste)
     score = _extract_score(answer)
-    if score is not None and score >= 6 and not job_context:
-    logger.warning(
-        "Score élevé (%d/10) sans contexte RAG — vérifier la pertinence", score
-    )
+    
     elapsed = round(time.time() - t0, 2)
 
     return {
