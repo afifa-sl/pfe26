@@ -74,25 +74,35 @@ ANALYSIS_PROMPT = """Tu es un expert RH chez Sonatrach. Analyse le CV ci-dessous
 === CV DU CANDIDAT ===
 {cv_text}
 
+=== BARÈME DE NOTATION STRICT ===
+- 0-2 : Aucune formation technique, aucune expérience pertinente, profil totalement hors domaine
+- 3-4 : Formation marginalement liée, très peu d'expérience pertinente
+- 5-6 : Formation partiellement liée OU quelques expériences pertinentes
+- 7-8 : Bonne adéquation formation + expérience avec les exigences du poste
+- 9-10 : Excellente adéquation, toutes les exigences remplies
+
+⚠️ RÈGLES STRICTES :
+- Une licence en lettres, sciences humaines ou toute formation non technique = score MAX 3 pour un poste technique Sonatrach
+- Sans expérience dans le secteur pétrolier/gazier/industriel = pénalité importante
+- Les "qualités transversales" seules ne justifient JAMAIS un score supérieur à 3
+- Soyez rigoureux : un mauvais profil doit avoir un score bas, pas moyen
+
 === INSTRUCTIONS ===
-Réponds UNIQUEMENT en français, de façon structurée, avec les sections suivantes :
+Réponds UNIQUEMENT en français, de façon structurée :
 
-=== FORMAT OBLIGATOIRE (ne pas utiliser #, ##, ###) ===
-
-**SCORE DE CORRESPONDANCE** : [OBLIGATOIRE: un chiffre entier entre 0 et 10, exemple: 7]/10
+**SCORE DE CORRESPONDANCE** : [chiffre entre 0 et 10]/10
 
 **POINTS FORTS**
-- Liste des compétences et expériences du candidat qui correspondent aux exigences
+- ...
 
 **POINTS FAIBLES / MANQUANTS**
-- Compétences, diplômes ou expériences requis mais absents du CV
+- ...
 
 **RECOMMANDATION FINALE**
-Une phrase claire : Recommandé / À étudier / Non recommandé — avec justification concise.
+Recommandé / À étudier / Non recommandé — avec justification.
 
 **REMARQUES**
-Observations supplémentaires pertinentes pour la prise de décision."""
-
+Observations supplémentaires."""
 
 def build_analysis_prompt(cv_text: str, poste: str, job_context: str) -> str:
     return ANALYSIS_PROMPT.format(
@@ -161,7 +171,7 @@ def analyze_cv_with_pipeline(pipeline, cv_text: str, poste: str) -> dict:
         answer = pipeline.llm.generate(
     prompt=prompt,
     system="Tu es un expert RH chez Sonatrach. Réponds uniquement en français.",
-    temperature=0.1,
+    temperature=0.0,
     max_tokens=pipeline.config.llm_max_tokens_long,
 )
     except Exception as e:
@@ -169,7 +179,10 @@ def analyze_cv_with_pipeline(pipeline, cv_text: str, poste: str) -> dict:
 
     # 4. Extraction du score (robuste)
     score = _extract_score(answer)
-
+    if score is not None and score >= 6 and not job_context:
+    logger.warning(
+        "Score élevé (%d/10) sans contexte RAG — vérifier la pertinence", score
+    )
     elapsed = round(time.time() - t0, 2)
 
     return {
