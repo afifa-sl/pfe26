@@ -182,12 +182,12 @@ def analyze_cv_with_pipeline(pipeline, cv_text: str, poste: str) -> dict:
 
 
 def _extract_score(text: str) -> Optional[int]:
-    """Tente d'extraire le score X/10 depuis la réponse du LLM."""
     import re
     patterns = [
-        r"SCORE[^:]*:\s*(\d{1,2})/10",
-        r"(\d{1,2})\s*/\s*10",
-        r"SCORE[^:]*:\s*\[?(\d{1,2})\]?",
+        r"SCORE[^:\n]*:\s*\**\s*(\d{1,2})\s*\**\s*/\s*10",  
+        r"SCORE[^:\n]*:\s*\[?(\d{1,2})\]?\s*/\s*10",        
+        r"\*\*(\d{1,2})\*\*\s*/\s*10",                       
+        r"(\d{1,2})\s*/\s*10",                                 
     ]
     for pat in patterns:
         m = re.search(pat, text, re.IGNORECASE)
