@@ -156,7 +156,12 @@ def analyze_cv_with_pipeline(pipeline, cv_text: str, poste: str) -> dict:
     # 3. Appel LLM
     try:
         messages = [{"role": "user", "content": prompt}]
-        answer = pipeline.llm.chat(messages, max_new_tokens=pipeline.config.llm_max_tokens_long)
+        answer = pipeline.llm.generate(
+    prompt=prompt,
+    system="Tu es un expert RH chez Sonatrach. Réponds uniquement en français.",
+    temperature=0.1,
+    max_tokens=pipeline.config.llm_max_tokens_long,
+)
     except Exception as e:
         raise RuntimeError(f"Erreur LLM lors de l'analyse : {e}")
 
