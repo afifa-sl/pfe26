@@ -77,7 +77,7 @@ ANALYSIS_PROMPT = """Tu es un expert RH chez Sonatrach. Analyse le CV ci-dessous
 === INSTRUCTIONS ===
 Réponds UNIQUEMENT en français, de façon structurée, avec les sections suivantes :
 
-**SCORE DE CORRESPONDANCE** : X/10 (chiffre entier)
+**SCORE DE CORRESPONDANCE** : [OBLIGATOIRE: un chiffre entier entre 0 et 10, exemple: 7]/10
 
 **POINTS FORTS**
 - Liste des compétences et expériences du candidat qui correspondent aux exigences
@@ -118,7 +118,7 @@ def analyze_cv_with_pipeline(pipeline, cv_text: str, poste: str) -> dict:
 
     try:
         # Récupération des chunks pertinents via le vector store
-        query_embedding = pipeline.embedder.encode([search_query])[0]
+        query_embedding = pipeline.embedder.embed_single(search_query) 
         dense_results = pipeline.vector_store.search(query_embedding, k=pipeline.config.top_k_dense)
 
         # BM25 si disponible
