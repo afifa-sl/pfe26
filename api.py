@@ -2,13 +2,14 @@
 import sys, os, json, shutil
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Header, Depends, BackgroundTasks
+from fastapi import FastAPI, HTTPException, UploadFile, File, Header, Depends, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 
 from config import config
-from auth import init_db, login, verify_token, revoke_token, create_user, list_users, update_user, delete_user ,save_history, get_history, delete_history 
+from auth import init_db, login, verify_token, revoke_token, create_user, list_users, update_user, delete_user ,save_history, get_history, delete_history
+from cv_analyzer import extract_cv_text, analyze_cv_with_pipeline
 from src.pipeline import RAGPipeline
 from src.ingestion.loader import scrape_url
 
@@ -179,6 +180,48 @@ def reset_index(admin: dict = Depends(require_superadmin)):
     if os.path.exists(config.bm25_index_path): os.remove(config.bm25_index_path)
     ingestion_status["last_result"] = None
     return {"message": "Index réinitialisé"}
+
+@app.post("/cv-analyze")
+async def cv_analyze(
+    file: UploadFile = File(...),
+    poste: str = Form(""),
+    admin: dict = Depends(require_superadmin),
+):
+    """
+    Analyse un CV (PDF / DOCX / TXT) par rapport à un poste donné.
+    Réservé aux superadmins.
+    """
+    allowed = {".pdf", ".docx", ".txt"}
+    ext = os.path.splitext(file.filename)[1].lower()
+
+    if ext not in allowed:
+        raise HTTPException(
+            400,
+            f"Format non supporté : {ext}. Formats acceptés : PDF, DOCX, TXT"
+        )
+
+    if not pipeline:
+        raise HTTPException(503, "Pipeline RAG non initialisé")
+
+    content = await file.read()
+
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(413, "Fichier trop volumineux (max 10 Mo)")
+
+    try:
+        cv_text = extract_cv_text(content, file.filename)
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(400, str(e))
+
+    if not cv_text.strip():
+        raise HTTPException(422, "Le CV semble vide ou illisible")
+
+    try:
+        result = analyze_cv_with_pipeline(pipeline, cv_text, poste)
+        result["filename"] = file.filename
+        return result
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
 
 @app.post("/lien")
 def add_liens(req: LienRequest, background_tasks: BackgroundTasks, admin: dict = Depends(require_superadmin)):
