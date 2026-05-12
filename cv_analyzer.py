@@ -118,9 +118,7 @@ Recommandé / À étudier / Non recommandé avec justification.
 **REMARQUES**
 Observations supplémentaires.
 
-**POSTE RECOMMANDÉ**
-Nom du poste Sonatrach le plus adapté à ce candidat.
-Répondre par un seul intitulé.
+**POSTE RECOMMANDÉ** : [intitulé exact du poste, sans explication]
 """
 
 
@@ -263,17 +261,17 @@ def _extract_score(text: str) -> Optional[int]:
 def _extract_recommended_poste(text: str) -> Optional[str]:
     import re
     patterns = [
-        r"\*\*POSTE RECOMMANDÉ\*\*\s*[:\n]+\s*(.+)",
-        r"POSTE RECOMMANDÉ\s*[:\n]+\s*(.+)",
-        r"POSTE RECOMMANDÉ\s*:\s*(.+)",
-        r"\*\*POSTE RECOMMAND[EÉ]\*\*\s*[:\n]+\s*(.+)",  # ← accent optionnel
-        r"POSTE RECOMMAND[EÉ]\s*[:\n]+\s*(.+)",
+        # Inline avec deux-points : **POSTE RECOMMANDÉ** : Ingénieur forage
+        r"\*{0,2}POSTE\s+RECOMMAND[EÉ]\*{0,2}\s*[:\-]\s*([^\n\[\]]+)",
+        # Ligne suivante : **POSTE RECOMMANDÉ**\nIngénieur forage
+        r"\*{0,2}POSTE\s+RECOMMAND[EÉ]\*{0,2}\s*\n+\s*([^\n\[\]\*]+)",
     ]
     for pat in patterns:
         m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
         if m:
-            value = m.group(1).strip().split("\n")[0].strip("*• \t")
-            if value:
+            value = m.group(1).strip().strip("*•[] \t")
+            # Rejeter si c'est le texte de template (crochets, trop court)
+            if value and "[" not in value and len(value) > 3:
                 return value
    
     return None
