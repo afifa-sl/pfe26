@@ -118,7 +118,8 @@ Recommandé / À étudier / Non recommandé avec justification.
 **REMARQUES**
 Observations supplémentaires.
 
-**POSTE RECOMMANDÉ** : [intitulé exact du poste, sans explication]
+**POSTE RECOMMANDÉ** : [intitulé du poste Sonatrach le PLUS ADAPTÉ au profil réel du candidat, 
+indépendamment du poste visé — basé uniquement sur sa formation et son expérience]
 """
 
 
@@ -143,11 +144,13 @@ def analyze_cv_with_pipeline(pipeline, cv_text: str, poste: str) -> dict:
 
     search_poste = poste.strip() if poste else ""
 
-    search_query = (
-        f"exigences compétences diplômes requis poste {search_poste}"
-        if search_poste
-        else "profil compétences recrutement Sonatrach"
-    )
+    if search_poste:
+    search_query = f"exigences compétences diplômes requis poste {search_poste}"
+else:
+    # Utiliser le contenu réel du CV pour chercher les postes correspondants
+    # → évite de biaiser vers un poste fixe comme "recrutement"
+    cv_hint = " ".join(cv_text[:600].split())[:300]
+    search_query = f"poste Sonatrach requis diplôme expérience {cv_hint}"
 
     try:
         query_embedding = pipeline.embedder.embed_single(search_query)
