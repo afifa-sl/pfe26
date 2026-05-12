@@ -145,12 +145,10 @@ def analyze_cv_with_pipeline(pipeline, cv_text: str, poste: str) -> dict:
     search_poste = poste.strip() if poste else ""
 
     if search_poste:
-    search_query = f"exigences compétences diplômes requis poste {search_poste}"
-else:
-    # Utiliser le contenu réel du CV pour chercher les postes correspondants
-    # → évite de biaiser vers un poste fixe comme "recrutement"
-    cv_hint = " ".join(cv_text[:600].split())[:300]
-    search_query = f"poste Sonatrach requis diplôme expérience {cv_hint}"
+        search_query = f"exigences compétences diplômes requis poste {search_poste}"
+    else:
+        cv_hint = " ".join(cv_text[:600].split())[:300]
+        search_query = f"poste Sonatrach requis diplôme expérience {cv_hint}"
 
     try:
         query_embedding = pipeline.embedder.embed_single(search_query)
